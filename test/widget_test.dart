@@ -42,8 +42,8 @@ void main() {
     state.autoCalibrateFromVisualScore(80);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
-    expect(find.text('68 ppm'), findsOneWidget);
-    expect(find.text('280 ppm'), findsOneWidget);
+    expect(find.text('64.0 ppm'), findsOneWidget);
+    expect(find.text('304.0 ppm'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     final slider = find.byType(Slider).first;

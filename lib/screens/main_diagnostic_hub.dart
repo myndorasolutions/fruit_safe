@@ -6,12 +6,12 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:fruit_safe/providers/app_state.dart';
-import 'package:fruit_safe/models/diagnostic_data.dart';
+import 'package:fruit_safe/screens/splash_screen.dart';
 import 'package:fruit_safe/screens/web_webcam.dart';
 import 'package:fruit_safe/services/audio_service.dart';
+import 'package:fruit_safe/widgets/developer_settings_dialog.dart';
 import 'package:fruit_safe/services/reference_gallery.dart';
 import 'package:fruit_safe/services/vision_service.dart';
-import 'package:fruit_safe/services/natlas_client.dart';
 import 'package:fruit_safe/theme/app_theme.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -116,22 +116,37 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
     required String source,
     String? fruit,
     String? assetPath,
+    ReferencePreset? preset,
   }) async {
     if (!mounted) return;
     final state = AppState.of(context);
     state.setCapturedImage(
       bytes,
       source: source,
-      fruit: fruit,
-      assetPath: assetPath,
+      fruit: preset?.fruit ?? fruit,
+      assetPath: preset?.assetPath ?? assetPath,
     );
-    final produce = fruit ?? state.selectedFruit;
-    final score = await VisionService.instance.analyzeFruitVisualRisk(
-      imageBytes: bytes,
-      sampleFruitName: produce,
-    );
-    if (!mounted) return;
-    AppState.of(context).autoCalibrateFromVisualScore(score, fruitName: produce);
+    if (preset != null) {
+      state.applyCalibratedReading(
+        fruit: preset.fruit,
+        sampleType: preset.sampleType,
+        visualScore: preset.visualAnomalyScore,
+        acetylenePpm: preset.acetylenePpm,
+        vocPpm: preset.vocPpm,
+        riskTier: preset.riskTier,
+      );
+    } else {
+      final reading = await VisionService.instance.analyzeCapture(bytes);
+      if (!mounted) return;
+      final produce = fruit ?? AppState.of(context).activeFruit;
+      AppState.of(context).applyCalibratedReading(
+        fruit: produce,
+        sampleType: VisionService.sampleTypeForScore(reading.visualAnomalyScore),
+        visualScore: reading.visualAnomalyScore,
+        acetylenePpm: reading.acetylenePpm,
+        vocPpm: reading.vocPpm,
+      );
+    }
     if (!mounted) return;
     setState(() {});
     _showCalibrationChip();
@@ -150,6 +165,81 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
     _chipTimer?.cancel();
     if (!_showCalibrationNote || !mounted) return;
     setState(() => _showCalibrationNote = false);
+  }
+
+  /// Drops the in-progress photo, clears telemetry, and stops playback.
+  Future<void> _endInspection() async {
+    _hideCalibrationChip();
+    if (_listening || _openingCamera) {
+      setState(() {
+        _listening = false;
+        _openingCamera = false;
+      });
+    }
+    if (!mounted) return;
+    AppState.of(context).resetDiagnosticSession();
+    await AudioService.instance.stop();
+  }
+
+  Future<void> _returnToWelcome() async {
+    await _endInspection();
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const SplashScreen()),
+      (route) => false,
+    );
+  }
+
+  Future<void> _confirmExitApplication() async {
+    final leave = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Exit Fruit-Safe?'),
+          content: const Text(
+            'This will shut down active sensor feeds, clear inspection telemetry, and terminate the session.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Stay'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Exit App'),
+            ),
+          ],
+        );
+      },
+    );
+    if (leave != true || !mounted) return;
+    await _endInspection();
+    if (!mounted) return;
+    await _closeApplication();
+  }
+
+  Future<void> _closeApplication() async {
+    if (!kIsWeb) {
+      try {
+        await SystemNavigator.pop();
+      } on Object {
+        // The host already closed the window, or this platform ignores pop.
+      }
+      return;
+    }
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute<void>(builder: (_) => const SplashScreen()),
+      (route) => false,
+    );
+    if (messenger == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('Session ended. You may now close this browser tab.'),
+        ),
+      );
+    });
   }
 
   void _openReferenceSheet() {
@@ -195,8 +285,7 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
                           await _ingestImage(
                             bytes,
                             source: AppState.sourceReference,
-                            fruit: preset.fruit,
-                            assetPath: preset.assetPath,
+                            preset: preset,
                           );
                         },
                       );
@@ -229,17 +318,19 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
       barrierDismissible: false,
       builder: (_) => const _ScanDialog(),
     );
-    final inferenceFuture = AudioService.instance.consultNatlas(
-      produceType: diagnostic.fruitType,
-      acetylenePpm: diagnostic.acetylenePpm,
-      vocLevel: diagnostic.vocLevel,
-      safetyTier: diagnostic.status,
+    final inferenceFuture = AudioService.instance.inferNATLASAdvice(
+      fruit: diagnostic.fruitType,
+      acetylene: diagnostic.acetylenePpm,
+      voc: diagnostic.vocLevel,
+      tier: diagnostic.status,
       language: language,
     );
-    final visionFuture = VisionService.instance.analyzeFruitVisualRisk(
-      imageBytes: state.capturedImageBytes,
-      sampleFruitName: state.selectedFruit,
-    );
+    final visionFuture = state.imageSource == AppState.sourceReference
+        ? Future<double>.value(state.visualAnomalyScore)
+        : VisionService.instance.analyzeFruitVisualRisk(
+            imageBytes: state.capturedImageBytes,
+            sampleFruitName: state.selectedFruit,
+          );
     final completed = await Future.wait<Object?>([
       Future<void>.delayed(const Duration(seconds: 2)),
       AudioService.instance.playScan(language),
@@ -247,23 +338,21 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
       inferenceFuture,
     ]);
     final visualScore = completed[2]! as double;
-    final inference = completed[3] as NatlasInference?;
+    final advice = completed[3] as String?;
     if (!mounted) return;
     Navigator.of(context).pop();
     final fused = state.runDiagnostic(visualScore: visualScore);
-    final result = _withNatlas(fused, inference);
+    final result = advice == null
+        ? fused
+        : fused.copyWith(audioFeedbackText: advice, natlasProvidedText: true);
     if (!mounted) return;
-    await Navigator.pushNamed(context, '/results', arguments: result);
-  }
-
-  DiagnosticData _withNatlas(DiagnosticData diagnostic, NatlasInference? inference) {
-    if (inference == null) return diagnostic;
-    final text = inference.hasText ? inference.text! : diagnostic.audioFeedbackText;
-    return diagnostic.copyWith(
-      audioFeedbackText: text,
-      remoteAudioUri: inference.hasAudio ? inference.audioUri : null,
-      natlasProvidedText: inference.hasText && !inference.hasAudio,
+    unawaited(
+      AudioService.instance.playLocalResult(
+        language: language,
+        status: result.status,
+      ),
     );
+    await Navigator.pushNamed(context, '/results', arguments: result);
   }
 
   static const double _wideBreakpoint = 800;
@@ -407,8 +496,15 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (_showCalibrationNote) ...[
-            const Align(alignment: Alignment.centerLeft, child: _CalibrationChip()),
+          if (_showCalibrationNote && appState.calibrationMessage != null) ...[
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 280),
+              child: _CalibrationChip(
+                key: ValueKey(appState.calibrationMessage),
+                message: appState.calibrationMessage ??
+                    'Auto-calibrated telemetry from visual inspection',
+              ),
+            ),
             SizedBox(height: wide ? 8 : 12),
           ],
           if (appState.isSimulationMode)
@@ -480,8 +576,8 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
         leadingWidth: 56,
         foregroundColor: Colors.white,
         leading: IconButton(
-          tooltip: 'Change Language',
-          onPressed: () => Navigator.of(context).pushReplacementNamed('/'),
+          tooltip: 'Back to Welcome Screen',
+          onPressed: _returnToWelcome,
           icon: Container(
             width: 36,
             height: 36,
@@ -499,6 +595,21 @@ class _MainDiagnosticHubState extends State<MainDiagnosticHub> {
         ),
         title: const Text('Fruit-Safe', overflow: TextOverflow.ellipsis),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.power_settings_new_rounded),
+            tooltip: 'Exit Application',
+            onPressed: _confirmExitApplication,
+          ),
+          IconButton(
+            tooltip: 'Developer & N-ATLAS Settings',
+            onPressed: () {
+              showDialog<void>(
+                context: context,
+                builder: (_) => const DeveloperSettingsDialog(),
+              );
+            },
+            icon: const Icon(Icons.tune_rounded),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 12),
             child: Center(
@@ -890,18 +1001,21 @@ class _FruitPreview extends StatelessWidget {
 }
 
 class _CalibrationChip extends StatelessWidget {
-  const _CalibrationChip();
+  const _CalibrationChip({super.key, required this.message});
+
+  final String message;
 
   @override
   Widget build(BuildContext context) {
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
         color: AppColors.nAtlasAmber,
         borderRadius: BorderRadius.circular(20),
       ),
       child: Text(
-        'Auto-calibrated telemetry from visual inspection',
+        message,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
           color: Colors.white,
           fontWeight: FontWeight.w700,
@@ -932,7 +1046,7 @@ class _SimulationSliders extends StatelessWidget {
       children: [
         _ReadingSlider(
           label: 'Acetylene (C2H2)',
-          valueLabel: '${acetylene.toStringAsFixed(0)} ppm',
+          valueLabel: '${acetylene.toStringAsFixed(1)} ppm',
           value: acetylene,
           max: 100,
           activeColor: AppColors.nAtlasAmber,
@@ -942,7 +1056,7 @@ class _SimulationSliders extends StatelessWidget {
         SizedBox(height: compact ? 2 : 8),
         _ReadingSlider(
           label: 'VOC',
-          valueLabel: '${voc.toStringAsFixed(0)} ppm',
+          valueLabel: '${voc.toStringAsFixed(1)} ppm',
           value: voc,
           max: 500,
           activeColor: AppColors.eNoseCyan,

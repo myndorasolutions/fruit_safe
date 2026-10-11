@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:fruit_safe/providers/app_state.dart';
+import 'package:fruit_safe/services/audio_service.dart';
 import 'package:fruit_safe/screens/diagnostic_results_screen.dart';
 import 'package:fruit_safe/screens/main_diagnostic_hub.dart';
 import 'package:fruit_safe/screens/splash_screen.dart';
@@ -18,6 +21,12 @@ class FruitSafeApp extends StatefulWidget {
 
 class _FruitSafeAppState extends State<FruitSafeApp> {
   final AppState _state = AppState();
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(AudioService.instance.loadSavedToken());
+  }
 
   @override
   void dispose() {

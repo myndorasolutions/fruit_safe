@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:fruit_safe/providers/app_state.dart';
 import 'package:fruit_safe/services/audio_service.dart';
 import 'package:fruit_safe/theme/app_theme.dart';
+import 'package:fruit_safe/widgets/developer_settings_dialog.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -163,7 +164,26 @@ class _SplashScreenState extends State<SplashScreen> {
       behavior: HitTestBehavior.translucent,
       onPointerDown: (_) => _onFirstPointer(),
       child: Scaffold(
-      body: SafeArea(
+        appBar: AppBar(
+          automaticallyImplyLeading: false,
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          foregroundColor: AppColors.darkSlate,
+          actions: [
+            IconButton(
+              tooltip: 'Developer & N-ATLAS Settings',
+              onPressed: () {
+                showDialog<void>(
+                  context: context,
+                  builder: (_) => const DeveloperSettingsDialog(),
+                );
+              },
+              icon: const Icon(Icons.tune_rounded),
+            ),
+          ],
+        ),
+        body: SafeArea(
         child: LayoutBuilder(
           builder: (context, constraints) {
             return SingleChildScrollView(

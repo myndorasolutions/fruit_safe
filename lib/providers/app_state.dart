@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:fruit_safe/models/diagnostic_data.dart';
+import 'package:fruit_safe/services/vision_service.dart';
 
 /// Shared market session: language, simulation inputs, and the last reading.
 class AppState extends ChangeNotifier {
@@ -20,8 +21,25 @@ class AppState extends ChangeNotifier {
   /// VOC reading used by the gas sliders. Stored as [vocLevel] for diagnostics.
   double get vocPpm => vocLevel;
   set vocPpm(double value) => vocLevel = value;
+
+  /// Produce under the lens. Same value as [selectedFruit].
+  String get activeFruit => selectedFruit;
+  set activeFruit(String value) {
+    if (!fruits.contains(value)) return;
+    selectedFruit = value;
+  }
+
   double latestVisualScore = 30;
+
+  /// Optical anomaly from the last calibration. Same value as [latestVisualScore].
+  double get visualAnomalyScore => latestVisualScore;
+  set visualAnomalyScore(double value) {
+    latestVisualScore = value.clamp(0.0, 100.0).toDouble();
+  }
+
   double latestApiScore = 0;
+  String? activeRiskTier;
+  String? calibrationMessage;
   Uint8List? capturedImageBytes;
   String? capturedAssetPath;
   String? imageSource;
@@ -70,25 +88,54 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Applies one calibrated sample and recomputes the adulteration index.
+  void applyCalibratedReading({
+    required String fruit,
+    required String sampleType,
+    required double visualScore,
+    required double acetylenePpm,
+    required double vocPpm,
+    String? riskTier,
+  }) {
+    if (fruits.contains(fruit)) {
+      selectedFruit = fruit;
+    }
+    latestVisualScore = visualScore.clamp(0.0, 100.0).toDouble();
+    this.acetylenePpm = acetylenePpm.clamp(0.0, 100.0).toDouble();
+    vocLevel = vocPpm.clamp(0.0, 500.0).toDouble();
+    activeRiskTier = riskTier;
+    latestApiScore = adulterationScore(visualScore: latestVisualScore);
+    calibrationMessage = calibrationSentence(
+      fruit: selectedFruit,
+      sampleType: sampleType,
+      acetylenePpm: this.acetylenePpm,
+      vocPpm: vocLevel,
+    );
+    notifyListeners();
+  }
+
+  /// Sentence shown beside the gas sliders after a photo or reference pick.
+  static String calibrationSentence({
+    required String fruit,
+    required String sampleType,
+    required double acetylenePpm,
+    required double vocPpm,
+  }) {
+    return 'Visual Auto-Calibration: $fruit $sampleType detected. '
+        'Calibrated Acetylene to ${acetylenePpm.toStringAsFixed(1)} PPM, '
+        'VOC to ${vocPpm.toStringAsFixed(1)} PPM.';
+  }
+
   /// Sets simulated wand readings from a visual anomaly score.
   void autoCalibrateFromVisualScore(double visualScore, {String? fruitName}) {
-    final score = visualScore.clamp(0, 100).toDouble();
-    if (score > 60) {
-      acetylenePpm = 68;
-      vocPpm = 280;
-    } else if (score < 30) {
-      acetylenePpm = 6;
-      vocPpm = 45;
-    } else {
-      acetylenePpm = 35;
-      vocPpm = 140;
-    }
-    if (fruitName != null && fruits.contains(fruitName)) {
-      selectedFruit = fruitName;
-    }
-    latestVisualScore = score;
-    latestApiScore = adulterationScore(visualScore: score);
-    notifyListeners();
+    final reading = VisionService.readingForScore(visualScore);
+    applyCalibratedReading(
+      fruit: fruitName ?? selectedFruit,
+      sampleType: VisionService.sampleTypeForScore(reading.visualAnomalyScore),
+      visualScore: reading.visualAnomalyScore,
+      acetylenePpm: reading.acetylenePpm,
+      vocPpm: reading.vocPpm,
+    );
   }
 
   /// Updates both simulated wand readings in one notification.
@@ -123,6 +170,20 @@ class AppState extends ChangeNotifier {
     if (capturedImageBytes == null && capturedAssetPath == null && imageSource == null) {
       return;
     }
+    capturedImageBytes = null;
+    capturedAssetPath = null;
+    imageSource = null;
+    notifyListeners();
+  }
+
+  /// Clears the current batch so the next scan starts from a safe trace.
+  void resetDiagnosticSession() {
+    acetylenePpm = 4;
+    vocLevel = 40;
+    latestVisualScore = 0;
+    latestApiScore = 0;
+    activeRiskTier = null;
+    calibrationMessage = null;
     capturedImageBytes = null;
     capturedAssetPath = null;
     imageSource = null;
@@ -166,6 +227,11 @@ class AppState extends ChangeNotifier {
       status: status,
       audioFeedbackText: _advice(selectedLanguage, status, selectedFruit),
     );
+  }
+
+  /// Bundled market warning used when cloud speech is unavailable.
+  static String localAdvisory(String language, String status, String fruit) {
+    return _advice(language, status, fruit);
   }
 
   static String _advice(String language, String status, String fruit) {
